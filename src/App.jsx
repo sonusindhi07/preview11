@@ -1,7 +1,9 @@
 import React, { useState, useEffect, useCallback } from 'react';
+
+// Firebase imports
 import { initializeApp } from 'firebase/app';
 import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
-import { getFirestore } from 'firebase/firestore'; // Included for completeness
+import { getFirestore } from 'firebase/firestore';
 
 // --- Configuration and Constants ---
 const MODEL_NAME_TEXT = "gemini-2.5-flash-preview-09-2025";
@@ -15,24 +17,13 @@ const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__f
 const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
 const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
 
-// Response Schema for structured output
+// Response Schema for structured editorial analysis
 const analysisSchema = {
     type: "OBJECT",
     properties: {
         textWithErrorsHighlighted: {
             type: "STRING",
-            description: "The original text with HTML <span> tags injected around detected errors (grammatical, spelling, punctuation), using the class 'error-highlight'. Example: The cow <span class=\"error-highlight\">eat</span> grass."
-        },
-        suggestedCorrections: { // Renamed and changed structure for error-correction pairs
-            type: "ARRAY",
-            items: {
-                type: "OBJECT",
-                properties: {
-                    originalError: { "type": "STRING", description: "The exact phrase or word highlighted as an error in textWithErrorsHighlighted." },
-                    correctedText: { "type": "STRING", description: "The grammatically correct or improved text suggestion for the original error." }
-                }
-            },
-            description: "A list of specific error-correction pairs found in the text."
+            description: "The original text structure, but with errors replaced by: <span class='error-highlight'>OriginalWord</span> <span class='correction-suggestion'>[SuggestedWord]</span>"
         },
         headlinesAndSubheadlines: {
             type: "ARRAY",
@@ -45,8 +36,7 @@ const analysisSchema = {
             }
         }
     },
-    // Updated required list to use the new field name
-    required: ["textWithErrorsHighlighted", "suggestedCorrections", "headlinesAndSubheadlines"]
+    required: ["textWithErrorsHighlighted", "headlinesAndSubheadlines"]
 };
 
 // --- Main React Component ---
@@ -113,7 +103,7 @@ const App = () => {
         });
     };
 
-    // 2. Main Analysis Logic (Fetch Gemini)
+    // 2. Main Editorial Analysis Logic (Fetch Gemini)
     const fetchGeminiAnalysis = useCallback(async (base64Image = null, textInput = '') => {
         if (!textInput && !base64Image) {
             setError("Please provide text or an image to analyze.");
@@ -122,13 +112,15 @@ const App = () => {
 
         setIsLoading(true);
         setError('');
+        setCurrentAnalysis(null); // Clear previous analysis
 
-        // UPDATED PROMPT for specific corrections
         const prompt = `You are a professional newspaper editor and language analyst. Your task is to analyze the provided article text.
-        1. **Error Highlighting**: Identify grammatical, spelling, and minor factual errors. Return the ORIGINAL text, but wrap all error words or phrases in a span with the CSS class 'error-highlight' (defined as text-red-600 font-bold). DO NOT correct the text here.
-        2. **Suggested Corrections**: For every grammatical, spelling, or factual error identified in the text, provide the exact original erroneous word/phrase and the single, best corrected word/phrase suggestion for it.
-        3. **Hindi Headlines**: Provide ${numHeadlines} sets of catchy, journalistic headlines and subheadlines written *exclusively* in **Hindi**.
-        4. **Article Text**: ${textInput}`;
+        1. **Inline Correction**: Identify grammatical, spelling, and minor factual errors. Return the ORIGINAL text, but for every error, replace the erroneous word/phrase with a combined HTML structure. This structure MUST contain the original error, followed immediately by the suggestion enclosed in square brackets, all wrapped in distinct spans for styling. The structure should be: 
+        \`<span class="error-highlight">OriginalError</span> <span class="correction-suggestion">[Correction]</span>\`
+        Ensure that the structure is properly inserted inline. Use the Hindi example: 'पेंडिंग' should become 'पेंडिंग <span class="error-highlight">पेंडिंग</span> <span class="correction-suggestion">[लंबित]</span>'.
+
+        2. **Hindi Headlines**: Provide ${numHeadlines} sets of catchy, journalistic headlines and subheadlines written *exclusively* in **Hindi**.
+        3. **Article Text**: ${textInput}`;
 
         let contents = [];
         let apiUrl = API_URL_TEXT;
@@ -205,8 +197,9 @@ const App = () => {
 
     }, [imageFile, numHeadlines, API_URL_TEXT, API_URL_MULTIMODAL]);
 
+
     // 3. User Interaction Handlers
-    const handleAnalyze = async (refreshImprovements = false) => {
+    const handleAnalyze = async () => {
         if (!inputText && !imageFile) {
             setError("Please paste text or select an image.");
             return;
@@ -222,7 +215,6 @@ const App = () => {
             }
         }
 
-        // To refresh suggested improvements/headlines, just re-run the analysis
         await fetchGeminiAnalysis(base64, inputText);
     };
 
@@ -230,7 +222,8 @@ const App = () => {
         const file = e.target.files[0];
         if (file) {
             setImageFile(file);
-            setInputText(`--- Image file selected: ${file.name} --- (Content will be transcribed by AI)`);
+            // Inform user that content will be transcribed
+            setInputText(`--- Image file selected: ${file.name} --- (Content will be transcribed by AI upon analysis)`); 
         } else {
             setImageFile(null);
             setInputText('');
@@ -255,6 +248,10 @@ const App = () => {
                     font-weight: 700;
                     text-decoration: underline wavy #ef4444;
                 }
+                .correction-suggestion {
+                    color: #10b981; /* Green */
+                    font-weight: 700;
+                }
             `}</style>
 
             <header className="text-center mb-8">
@@ -262,7 +259,7 @@ const App = () => {
                     Reporter's AI Editing Desk
                 </h1>
                 <p className="text-gray-600">
-                    Paste your article or upload an image for instant analysis and Hindi headline suggestions.
+                    Paste your article or upload an image for instant analysis, inline corrections, and Hindi headline suggestions.
                 </p>
                 <p className="text-xs text-gray-400 mt-2">
                     User ID: {userId || 'Authenticating...'} (App ID: {appId})
@@ -290,27 +287,29 @@ const App = () => {
                     }}
                     disabled={isLoading}
                 />
-                <div className="flex items-center justify-between mt-4 flex-wrap">
+                <div className="flex items-center justify-between mt-4 flex-wrap gap-4">
                     <label className="flex items-center space-x-2 bg-indigo-500 hover:bg-indigo-600 text-white font-semibold py-2 px-4 rounded-full cursor-pointer transition duration-200 shadow-md">
                         <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg>
                         <span>{imageFile ? imageFile.name : 'Upload Image (for OCR)'}</span>
                         <input type="file" accept="image/*" className="hidden" onChange={handleFileChange} disabled={isLoading} />
                     </label>
 
-                    <div className="flex items-center space-x-4 mt-2 sm:mt-0">
-                        <label className="text-gray-600 font-medium">Headlines (5-25):</label>
-                        <select
-                            value={numHeadlines}
-                            onChange={(e) => setNumHeadlines(Number(e.target.value))}
-                            className="p-2 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500"
-                            disabled={isLoading}
-                        >
-                            {Array.from({ length: 5 }, (_, i) => 5 + i * 4).map(n => (
-                                <option key={n} value={n}>{n}</option>
-                            ))}
-                        </select>
+                    <div className="flex items-center space-x-4 mt-2 sm:mt-0 flex-wrap gap-2">
+                        <div className="flex items-center space-x-2">
+                            <label className="text-gray-600 font-medium">Headlines (5-25):</label>
+                            <select
+                                value={numHeadlines}
+                                onChange={(e) => setNumHeadlines(Number(e.target.value))}
+                                className="p-2 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500"
+                                disabled={isLoading}
+                            >
+                                {Array.from({ length: 5 }, (_, i) => 5 + i * 4).map(n => (
+                                    <option key={n} value={n}>{n}</option>
+                                ))}
+                            </select>
+                        </div>
                         <button
-                            onClick={() => handleAnalyze(false)}
+                            onClick={handleAnalyze}
                             disabled={isLoading || (!inputText && !imageFile)}
                             className="bg-green-600 hover:bg-green-700 text-white font-bold py-3 px-6 rounded-full transition duration-200 shadow-lg disabled:opacity-50 disabled:cursor-not-allowed flex items-center"
                         >
@@ -319,58 +318,29 @@ const App = () => {
                             ) : (
                                 <svg className="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 15l-2 5L9 9l5-2 2 5zm0 0l-2 5L9 9l5-2 2 5z"></path></svg>
                             )}
-                            Analyze & Generate
+                            Analyze & Edit
                         </button>
                     </div>
                 </div>
             </div>
 
-            {/* Output Section (3 Boxes) */}
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 h-[70vh]">
+            {/* Primary Output Section (1, 3) - 2 Columns */}
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 h-[70vh] mb-8">
                 
-                {/* Box 1: Errors in Text (Required to show errors) */}
-                <OutputBox title="1. Original Text with Errors Highlighted (Red)" className="lg:col-span-1">
+                {/* Box 1: Errors with Inline Corrections */}
+                <OutputBox title="1. Text with Inline Corrections (Error: Red | Suggestion: Green)" className="lg:col-span-1">
                     {currentAnalysis?.textWithErrorsHighlighted ? (
                         <p
                             className="text-gray-700 leading-relaxed whitespace-pre-wrap"
                             dangerouslySetInnerHTML={{ __html: currentAnalysis.textWithErrorsHighlighted }}
                         />
                     ) : (
-                        <p className="text-gray-500 italic">{isLoading ? "Detecting errors..." : "Analysis result will appear here."}</p>
+                        <p className="text-gray-500 italic">{isLoading ? "Analyzing and integrating corrections..." : "Analysis result with inline error corrections will appear here."}</p>
                     )}
                 </OutputBox>
 
-                {/* Box 2: Suggested Improvements (Now shows Corrections) */}
-                <OutputBox title="2. Error Corrections (Original -> Suggested)" className="lg:col-span-1">
-                    {currentAnalysis?.suggestedCorrections?.length > 0 ? (
-                        <ul className="list-none space-y-3">
-                            {currentAnalysis.suggestedCorrections.map((correction, index) => (
-                                <li key={index} className="p-3 bg-white border border-gray-200 rounded-lg shadow-sm">
-                                    <p className="text-sm text-gray-500 mb-1">Original Error:</p>
-                                    <p className="text-lg font-semibold text-red-600 mb-2">
-                                        "{correction.originalError}"
-                                    </p>
-                                    <p className="text-sm text-gray-500 mb-1">Suggested Correction:</p>
-                                    <p className="text-lg font-semibold text-green-700">
-                                        "{correction.correctedText}"
-                                    </p>
-                                </li>
-                            ))}
-                        </ul>
-                    ) : (
-                        <p className="text-gray-500 italic">{isLoading ? "Generating error corrections..." : "Specific error-correction pairs will be listed here."}</p>
-                    )}
-                    <button
-                        onClick={() => handleAnalyze(true)}
-                        disabled={isLoading || !currentAnalysis}
-                        className="mt-4 w-full bg-blue-500 hover:bg-blue-600 text-white font-semibold py-2 px-4 rounded-lg transition duration-200 shadow-md disabled:opacity-50"
-                    >
-                        Refresh Corrections
-                    </button>
-                </OutputBox>
-
-                {/* Box 3: Hindi Headlines (Required to select N and refresh) */}
-                <OutputBox title={`3. Best Suggested Headlines & Subheadlines (Hindi - ${numHeadlines} Options)`} className="lg:col-span-1">
+                {/* Box 3: Hindi Headlines */}
+                <OutputBox title={`2. Best Suggested Headlines & Subheadlines (Hindi - ${numHeadlines} Options)`} className="lg:col-span-1">
                     {currentAnalysis?.headlinesAndSubheadlines?.length > 0 ? (
                         <div className="space-y-4">
                             {currentAnalysis.headlinesAndSubheadlines.map((item, index) => (
@@ -384,16 +354,14 @@ const App = () => {
                         <p className="text-gray-500 italic">{isLoading ? "Creating Hindi headline options..." : "Catchy headline/subheadline pairs in Hindi will appear here."}</p>
                     )}
                     <button
-                        onClick={() => handleAnalyze(true)}
+                        onClick={handleAnalyze}
                         disabled={isLoading || !currentAnalysis}
                         className="mt-4 w-full bg-orange-500 hover:bg-orange-600 text-white font-semibold py-2 px-4 rounded-lg transition duration-200 shadow-md disabled:opacity-50"
                     >
                         Refresh Headlines
                     </button>
                 </OutputBox>
-
             </div>
-
         </div>
     );
 }
